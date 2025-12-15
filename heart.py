@@ -16,47 +16,48 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Fonction pour calculer les limites d'outliers (pour le Capping)
-def calculate_outlier_limits(df):
+# Fonction de prétraitement des données (Basée sur BI.ipynb)
+# Stocke le capping dans les données d'entrainement.
+def preprocess_data(df_raw):
+    df = df_raw.copy()
+    
+    # Capping des Outliers (méthode IQR 1.5 pour les colonnes critiques)
     outlier_cols = ['creatinine_phosphokinase', 'serum_creatinine', 'platelets']
+    
+    # Créer un dictionnaire pour stocker les limites d'outliers
     outlier_limits = {} 
+    
     for col in outlier_cols:
         Q1 = df[col].quantile(0.25)
         Q3 = df[col].quantile(0.75)
         IQR = Q3 - Q1
         upper_limit = Q3 + 1.5 * IQR
-        outlier_limits[col] = upper_limit
-    return outlier_limits
-
-# Fonction d'application du prétraitement (Capping, FE et Scaling)
-# Appliqué à l'entraînement et à la prédiction individuelle
-def apply_preprocessing(df_raw, scaler, outlier_limits, fit_scaler=False):
-    df = df_raw.copy()
-    
-    # 1. Capping des Outliers
-    for col, limit in outlier_limits.items():
-        df[col] = np.where(df[col] > limit, limit, df[col])
         
-    # 2. Feature Engineering brut (Kidney_Heart_Risk_Raw)
+        # Stocker la limite pour la réutilisation lors de la prédiction
+        outlier_limits[col] = upper_limit
+        
+        # Imputation par la limite supérieure (Capping)
+        df[col] = np.where(df[col] > upper_limit, upper_limit, df[col])
+        
+    # Feature Engineering (Création de Kidney_Heart_Risk)
+    # Note: L'ordre des opérations (FE avant Scaling) est important pour ce calcul
     df['Kidney_Heart_Risk_Raw'] = df['age'] * df['serum_creatinine']
     
+    # Variables numériques à scaler (inclut les features créées/modifiées)
     numerical_cols_to_scale = [
         'age', 'creatinine_phosphokinase', 'ejection_fraction', 
         'platelets', 'serum_creatinine', 'serum_sodium', 'time', 'Kidney_Heart_Risk_Raw'
     ]
     
-    # 3. Scaling
-    if fit_scaler:
-        df[numerical_cols_to_scale] = scaler.fit_transform(df[numerical_cols_to_scale])
-    else:
-        # Utiliser .values pour éviter les avertissements de SettingWithCopy
-        df[numerical_cols_to_scale] = scaler.transform(df[numerical_cols_to_scale].values)
+    # Application du Standard Scaling
+    scaler = StandardScaler()
+    df[numerical_cols_to_scale] = scaler.fit_transform(df[numerical_cols_to_scale])
 
-    # 4. Création et suppression de la colonne intermédiaire
+    # Remplacer la colonne originale avec la feature 'Kidney_Heart_Risk' scalée
     df['Kidney_Heart_Risk'] = df['Kidney_Heart_Risk_Raw']
     df = df.drop(columns=['Kidney_Heart_Risk_Raw'])
     
-    return df
+    return df, scaler, outlier_limits # Retourne les limites en plus du scaler
 
 # Fonction d'entraînement du modèle
 def train_model(X, y, model_name, hyperparameters):
@@ -100,27 +101,57 @@ def train_model(X, y, model_name, hyperparameters):
     return model, metrics, X_test.columns.tolist()
 
 # --- 2. FONCTION DE PRÉDICTION EN TEMPS RÉEL (CORRIGÉE) ---
+# Ajout de outlier_limits comme paramètre
 def make_single_prediction(model, scaler, feature_names, input_data, outlier_limits):
     """
     Effectue une prédiction unique en s'assurant que les étapes de prétraitement
-    (Capping des outliers, FE, Scaling) et l'ordre des features correspondent
-    à l'entraînement.
+    (Capping des outliers, FE, Scaling, conservation des binaires) et l'ordre des features
+    correspondent à l'entraînement.
     """
+    # 1. Créer le DataFrame à partir des inputs (contient toutes les features initiales)
     df_single = pd.DataFrame([input_data])
     
-    # Appliquer le Prétraitement (SANS FIT)
-    df_processed = apply_preprocessing(df_single, scaler, outlier_limits, fit_scaler=False)
+    # 2. Appliquer le Capping des Outliers (Étape MANQUANTE dans la version originale)
+    for col, limit in outlier_limits.items():
+        # Applique la limite supérieure calculée sur l'ensemble d'entraînement
+        df_single[col] = np.where(df_single[col] > limit, limit, df_single[col])
+
+    # 3. Appliquer le Feature Engineering brut (non scalé)
+    # L'utilisation des valeurs "cappées" de 'serum_creatinine' est cruciale ici
+    df_single['Kidney_Heart_Risk_Raw'] = df_single['age'] * df_single['serum_creatinine']
     
-    # Ajouter les features binaires qui n'ont PAS été scalées (elles sont dans df_single)
-    binary_cols = ['anaemia', 'diabetes', 'high_blood_pressure', 'sex', 'smoking']
-    for col in binary_cols:
-        # Les binaires n'ont pas été transformées, les récupérer directement de l'input
-        df_processed[col] = df_single[col]
-        
-    # Réordonner les features (TRÈS IMPORTANT)
-    X_predict = df_processed[feature_names]
+    # 4. Identifier les colonnes
+    numerical_cols_to_scale = [
+        'age', 'creatinine_phosphokinase', 'ejection_fraction', 
+        'platelets', 'serum_creatinine', 'serum_sodium', 'time', 'Kidney_Heart_Risk_Raw'
+    ]
+    binary_cols = [
+        'anaemia', 'diabetes', 'high_blood_pressure', 'sex', 'smoking'
+    ]
     
-    # Prédiction
+    # 5. Appliquer le Scaling (utiliser le scaler FIT sur les données d'entraînement)
+    # Sélectionner UNIQUEMENT les colonnes que le scaler a été entraîné à transformer
+    df_to_scale = df_single[numerical_cols_to_scale]
+    
+    # Utiliser .values pour éviter les avertissements de SettingWithCopy
+    scaled_values = scaler.transform(df_to_scale.values)
+    
+    # Reconstruire le DataFrame avec les features numériques scalées
+    df_scaled_numerics = pd.DataFrame(scaled_values, columns=numerical_cols_to_scale, index=df_single.index)
+    
+    # 6. Assembler le DataFrame final pour la prédiction
+    # Créer la feature finale scalée et supprimer la version intermédiaire
+    X_predict_raw = df_scaled_numerics.rename(columns={'Kidney_Heart_Risk_Raw': 'Kidney_Heart_Risk'})
+    X_predict_raw = X_predict_raw.drop(columns=numerical_cols_to_scale[7:]) # Supprimer Kidney_Heart_Risk_Raw
+
+    
+    # Ajouter les features binaires originales qui n'ont PAS été scalées
+    X_predict_raw[binary_cols] = df_single[binary_cols]
+    
+    # 7. Réordonner les features (TRÈS IMPORTANT : l'ordre doit correspondre à feature_names)
+    X_predict = X_predict_raw[feature_names]
+    
+    # 8. Prédiction
     prediction = model.predict(X_predict)[0]
     proba = model.predict_proba(X_predict)[0]
     
@@ -129,8 +160,7 @@ def make_single_prediction(model, scaler, feature_names, input_data, outlier_lim
 # --- 3. GESTION DES SESSIONS ET DONNÉES PRÉ-CHARGÉES ---
 if 'data_loaded' not in st.session_state:
     st.session_state.data_loaded = False
-    st.session_state.df = None # DataFrame brut
-    st.session_state.df_processed_visual = None # DataFrame cappé (pour visualisation)
+    st.session_state.df = None
     st.session_state.target_col = 'DEATH_EVENT'
     st.session_state.feature_cols = [
         'age', 'anaemia', 'creatinine_phosphokinase', 'diabetes', 
@@ -138,8 +168,8 @@ if 'data_loaded' not in st.session_state:
         'serum_creatinine', 'serum_sodium', 'sex', 'smoking', 'time'
     ]
     st.session_state.model = None
-    st.session_state.scaler = StandardScaler() # Initialiser le scaler
-    st.session_state.outlier_limits = None 
+    st.session_state.scaler = None
+    st.session_state.outlier_limits = None # Stocker les limites de capping
     st.session_state.metrics = None
     st.session_state.model_feature_names = None
     st.session_state.model_name = None
@@ -171,7 +201,8 @@ with st.sidebar:
     if data_source == "Uploader un fichier CSV":
         uploaded_file = st.file_uploader("Choisissez un fichier CSV", type=["csv"])
         if uploaded_file is not None:
-            st.session_state.df = pd.read_csv(uploaded_file)
+            df_uploaded = pd.read_csv(uploaded_file)
+            st.session_state.df = df_uploaded
             st.session_state.data_loaded = True
             st.session_state.model = None # Réinitialiser le modèle si nouvelles données
             st.success("Fichier CSV chargé avec succès.")
@@ -179,26 +210,13 @@ with st.sidebar:
         st.session_state.df = df_default
         st.session_state.data_loaded = True
         st.success("Dataset Heart Failure chargé.")
-    
-    # Si les données sont chargées, calculer les limites pour les stocker et la visualisation
-    if st.session_state.data_loaded and st.session_state.df is not None and st.session_state.outlier_limits is None:
-        st.session_state.outlier_limits = calculate_outlier_limits(st.session_state.df)
-        
-        # Préparer le DataFrame pour la visualisation (Capping uniquement, SANS Scaling)
-        df_visual = st.session_state.df.copy()
-        for col, limit in st.session_state.outlier_limits.items():
-            df_visual[col] = np.where(df_visual[col] > limit, limit, df_visual[col])
-        st.session_state.df_processed_visual = df_visual
-        # Ne pas oublier la FE pour la visualisation
-        st.session_state.df_processed_visual['Kidney_Heart_Risk'] = st.session_state.df_processed_visual['age'] * st.session_state.df_processed_visual['serum_creatinine']
-
 
     # --- 5. SÉLECTION DU MODÈLE ET HYPERPARAMÈTRES ---
     st.header("2. Configuration du Modèle")
     model_choice = st.selectbox(
         "Sélectionnez le Modèle:",
         ['Random Forest', 'Logistic Regression', 'Gradient Boosting'],
-        index=0
+        index=0 # Random Forest est le modèle le plus performant dans l'analyse
     )
     
     st.subheader("Hyperparamètres")
@@ -215,24 +233,22 @@ with st.sidebar:
     if st.session_state.data_loaded:
         if st.button(f"Entraîner le Modèle ({model_choice})"):
             with st.spinner(f"Entraînement du modèle {model_choice} en cours..."):
-                
-                # 1. Préparation des données d'entraînement brutes
+                # Préparation des données d'entraînement (Exclut la cible)
                 X_train_data_raw = st.session_state.df.drop(columns=[st.session_state.target_col])
-                y = st.session_state.df[st.session_state.target_col]
-
-                # 2. Appliquer le preprocessing (FIT SCALER = True)
-                X = apply_preprocessing(
-                    X_train_data_raw, 
-                    st.session_state.scaler, 
-                    st.session_state.outlier_limits,
-                    fit_scaler=True # Ajuste le scaler
-                )
                 
-                # 3. Entraînement
+                # Appliquer le preprocessing
+                # CAPTURE DES LIMITES DE CAPPING
+                df_processed, scaler, outlier_limits = preprocess_data(X_train_data_raw)
+                X = df_processed
+                y = st.session_state.df[st.session_state.target_col]
+                
+                # Entraînement
                 model, metrics, feature_names = train_model(X, y, model_choice, hyperparameters)
                 
-                # 4. Sauvegarde dans la session
+                # Sauvegarde dans la session
                 st.session_state.model = model
+                st.session_state.scaler = scaler
+                st.session_state.outlier_limits = outlier_limits # SAUVEGARDE DE LA LIMITE
                 st.session_state.metrics = metrics
                 st.session_state.model_feature_names = feature_names
                 st.session_state.model_name = model_choice
@@ -278,7 +294,7 @@ with st.sidebar:
                     st.session_state.scaler, 
                     st.session_state.model_feature_names,
                     input_data,
-                    st.session_state.outlier_limits 
+                    st.session_state.outlier_limits # PASSER LES LIMITES DE CAPPING
                 )
                 
                 risk = "❌ RISQUE DE DÉCÈS ÉLEVÉ" if prediction == 1 else "✅ FAIBLE RISQUE DE DÉCÈS (Survie)"
@@ -289,8 +305,10 @@ with st.sidebar:
                 st.info(f"Probabilité de Décès: **{proba_risk:.2f}%**")
                 
             except Exception as e:
-                st.error(f"Erreur lors de la prédiction. Erreur : {e}")
+                # Ceci devrait maintenant être résolu grâce à la correction
+                st.error(f"Erreur lors de la prédiction. Assurez-vous que les données sont au bon format. Erreur : {e}")
     else:
+        # Ceci est l'affichage initial, qui ne devrait plus apparaître après un entraînement réussi.
         st.info("Veuillez d'abord charger les données et entraîner un modèle.")
 
 
@@ -360,66 +378,53 @@ with tab2:
         if hasattr(st.session_state.model, 'feature_importances_'):
             st.subheader("Importance des Caractéristiques (Feature Importance)")
             
-            # Récupérer les noms des features depuis le modèle (scalées/featurisées)
-            feature_names = st.session_state.model_feature_names
+            # Assurez-vous que l'indexation utilise les noms des features du modèle
+            importances = pd.Series(
+                st.session_state.model.feature_importances_, 
+                index=st.session_state.model_feature_names
+            ).sort_values(ascending=False).head(10)
             
-            # Si le modèle est LogReg (pas de feature_importances_)
-            if st.session_state.model_name != 'Logistic Regression':
-                importances = pd.Series(
-                    st.session_state.model.feature_importances_, 
-                    index=feature_names
-                ).sort_values(ascending=False).head(10)
-                
-                fig_importance = px.bar(
-                    importances,
-                    x=importances.values,
-                    y=importances.index,
-                    orientation='h',
-                    title="Top 10 Caractéristiques les plus importantes",
-                    labels={'x': 'Importance', 'y': 'Caractéristique'},
-                    height=400,
-                )
-                fig_importance.update_layout(xaxis_title="Importance du Modèle", yaxis_title="")
-                st.plotly_chart(fig_importance, use_container_width=True)
-            else:
-                st.info("L'importance des caractéristiques n'est pas directement disponible pour la Régression Logistique (utilisez les coefficients du modèle si nécessaire).")
+            fig_importance = px.bar(
+                importances,
+                x=importances.values,
+                y=importances.index,
+                orientation='h',
+                title="Top 10 Caractéristiques les plus importantes",
+                labels={'x': 'Importance', 'y': 'Caractéristique'},
+                height=400,
+            )
+            fig_importance.update_layout(xaxis_title="Importance du Modèle", yaxis_title="")
+            st.plotly_chart(fig_importance, use_container_width=True)
             
             st.info(
                 "L'importance des features après l'entraînement est affichée ici. "
                 "Ceci confirme généralement que la durée de suivi (`time`), la fonction cardiaque (`ejection_fraction`) et les marqueurs rénaux (`serum_creatinine`) sont les plus critiques."
             )
 
-    # 7. Visualisations dynamiques (Distribution par Variable Cible)
-    st.subheader("Analyse de la Distribution des Variables Clés")
-    
-    if st.session_state.data_loaded and st.session_state.df_processed_visual is not None:
-        # Utiliser le DF préparé pour la visualisation (cappé/FE, mais non scalé)
-        df_viz = st.session_state.df_processed_visual.copy()
-        df_viz[st.session_state.target_col] = st.session_state.df[st.session_state.target_col]
+        # 7. Visualisations dynamiques (Distribution par Variable Cible)
+        st.subheader("Analyse de la Distribution des Variables Clés")
         
-        # Liste de toutes les colonnes disponibles pour la visualisation
-        viz_options = df_viz.columns.drop(st.session_state.target_col, errors='ignore').tolist()
-        
-        viz_col = st.selectbox(
-            "Sélectionnez une variable pour voir sa distribution par événement de décès (target=DEATH_EVENT) :",
-            options=viz_options
-        )
-        
-        fig_dist = px.box(
-            df_viz,
-            x=st.session_state.target_col,
-            y=viz_col,
-            color=st.session_state.target_col,
-            title=f"Distribution de '{viz_col}' par Issue (0=Survie, 1=Décès)",
-            labels={st.session_state.target_col: "Événement de Décès (0:Survie, 1:Décès)", viz_col: viz_col},
-            color_discrete_map={0: 'blue', 1: 'red'}
-        )
-        st.plotly_chart(fig_dist, use_container_width=True)
-        st.markdown(
-            "*(Note: Les valeurs extrêmes (outliers) des colonnes CPK, Créatinine Sérique et Plaquettes sont plafonnées dans ce graphique pour des raisons de cohérence avec le prétraitement du modèle.)*"
-        )
+        if st.session_state.data_loaded:
+            viz_col = st.selectbox(
+                "Sélectionnez une variable pour voir sa distribution par événement de décès (target=DEATH_EVENT) :",
+                options=st.session_state.df.columns.drop(st.session_state.target_col, errors='ignore').tolist()
+            )
+            
+            fig_dist = px.box(
+                st.session_state.df,
+                x=st.session_state.target_col,
+                y=viz_col,
+                color=st.session_state.target_col,
+                title=f"Distribution de '{viz_col}' par Issue (0=Survie, 1=Décès)",
+                labels={st.session_state.target_col: "Événement de Décès (0:Survie, 1:Décès)", viz_col: viz_col},
+                color_discrete_map={0: 'blue', 1: 'red'}
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+        else:
+            st.warning("Veuillez charger un dataset pour afficher les visualisations de distribution.")
+
     else:
-        st.info("Veuillez charger un dataset pour afficher les visualisations de distribution.")
+        st.info("Veuillez entraîner un modèle dans la barre latérale pour voir les métriques et les visualisations.")
 
 
 # --- TAB 3 : EXPORT DES RÉSULTATS ---
