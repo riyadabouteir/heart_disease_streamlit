@@ -17,17 +17,25 @@ st.set_page_config(
 )
 
 # Fonction de prétraitement des données (Basée sur BI.ipynb)
-# Ceci doit être fait sur un ensemble de données pour obtenir les scalers/limites
+# Stocke le capping dans les données d'entrainement.
 def preprocess_data(df_raw):
     df = df_raw.copy()
     
     # Capping des Outliers (méthode IQR 1.5 pour les colonnes critiques)
     outlier_cols = ['creatinine_phosphokinase', 'serum_creatinine', 'platelets']
+    
+    # Créer un dictionnaire pour stocker les limites d'outliers
+    outlier_limits = {} 
+    
     for col in outlier_cols:
         Q1 = df[col].quantile(0.25)
         Q3 = df[col].quantile(0.75)
         IQR = Q3 - Q1
         upper_limit = Q3 + 1.5 * IQR
+        
+        # Stocker la limite pour la réutilisation lors de la prédiction
+        outlier_limits[col] = upper_limit
+        
         # Imputation par la limite supérieure (Capping)
         df[col] = np.where(df[col] > upper_limit, upper_limit, df[col])
         
@@ -49,7 +57,7 @@ def preprocess_data(df_raw):
     df['Kidney_Heart_Risk'] = df['Kidney_Heart_Risk_Raw']
     df = df.drop(columns=['Kidney_Heart_Risk_Raw'])
     
-    return df, scaler
+    return df, scaler, outlier_limits # Retourne les limites en plus du scaler
 
 # Fonction d'entraînement du modèle
 def train_model(X, y, model_name, hyperparameters):
@@ -93,19 +101,26 @@ def train_model(X, y, model_name, hyperparameters):
     return model, metrics, X_test.columns.tolist()
 
 # --- 2. FONCTION DE PRÉDICTION EN TEMPS RÉEL (CORRIGÉE) ---
-def make_single_prediction(model, scaler, feature_names, input_data):
+# Ajout de outlier_limits comme paramètre
+def make_single_prediction(model, scaler, feature_names, input_data, outlier_limits):
     """
     Effectue une prédiction unique en s'assurant que les étapes de prétraitement
-    (FE, Scaling, conservation des binaires) et l'ordre des features correspondent
-    à l'entraînement.
+    (Capping des outliers, FE, Scaling, conservation des binaires) et l'ordre des features
+    correspondent à l'entraînement.
     """
     # 1. Créer le DataFrame à partir des inputs (contient toutes les features initiales)
     df_single = pd.DataFrame([input_data])
     
-    # 2. Appliquer le Feature Engineering brut (non scalé)
+    # 2. Appliquer le Capping des Outliers (Étape MANQUANTE dans la version originale)
+    for col, limit in outlier_limits.items():
+        # Applique la limite supérieure calculée sur l'ensemble d'entraînement
+        df_single[col] = np.where(df_single[col] > limit, limit, df_single[col])
+
+    # 3. Appliquer le Feature Engineering brut (non scalé)
+    # L'utilisation des valeurs "cappées" de 'serum_creatinine' est cruciale ici
     df_single['Kidney_Heart_Risk_Raw'] = df_single['age'] * df_single['serum_creatinine']
     
-    # 3. Identifier les colonnes
+    # 4. Identifier les colonnes
     numerical_cols_to_scale = [
         'age', 'creatinine_phosphokinase', 'ejection_fraction', 
         'platelets', 'serum_creatinine', 'serum_sodium', 'time', 'Kidney_Heart_Risk_Raw'
@@ -114,28 +129,29 @@ def make_single_prediction(model, scaler, feature_names, input_data):
         'anaemia', 'diabetes', 'high_blood_pressure', 'sex', 'smoking'
     ]
     
-    # 4. Appliquer le Scaling (utiliser le scaler FIT sur les données d'entraînement)
+    # 5. Appliquer le Scaling (utiliser le scaler FIT sur les données d'entraînement)
     # Sélectionner UNIQUEMENT les colonnes que le scaler a été entraîné à transformer
     df_to_scale = df_single[numerical_cols_to_scale]
-    scaled_values = scaler.transform(df_to_scale)
+    
+    # Utiliser .values pour éviter les avertissements de SettingWithCopy
+    scaled_values = scaler.transform(df_to_scale.values)
     
     # Reconstruire le DataFrame avec les features numériques scalées
     df_scaled_numerics = pd.DataFrame(scaled_values, columns=numerical_cols_to_scale, index=df_single.index)
     
-    # 5. Assembler le DataFrame final pour la prédiction
+    # 6. Assembler le DataFrame final pour la prédiction
     # Créer la feature finale scalée et supprimer la version intermédiaire
-    df_scaled_numerics['Kidney_Heart_Risk'] = df_scaled_numerics['Kidney_Heart_Risk_Raw']
-    
-    # Conserver les features numériques scalées (et la nouvelle Kidney_Heart_Risk)
-    X_predict_raw = df_scaled_numerics.drop(columns=['Kidney_Heart_Risk_Raw'])
+    X_predict_raw = df_scaled_numerics.rename(columns={'Kidney_Heart_Risk_Raw': 'Kidney_Heart_Risk'})
+    X_predict_raw = X_predict_raw.drop(columns=numerical_cols_to_scale[7:]) # Supprimer Kidney_Heart_Risk_Raw
+
     
     # Ajouter les features binaires originales qui n'ont PAS été scalées
     X_predict_raw[binary_cols] = df_single[binary_cols]
     
-    # 6. Réordonner les features (TRÈS IMPORTANT : l'ordre doit correspondre à feature_names)
+    # 7. Réordonner les features (TRÈS IMPORTANT : l'ordre doit correspondre à feature_names)
     X_predict = X_predict_raw[feature_names]
     
-    # 7. Prédiction
+    # 8. Prédiction
     prediction = model.predict(X_predict)[0]
     proba = model.predict_proba(X_predict)[0]
     
@@ -153,6 +169,7 @@ if 'data_loaded' not in st.session_state:
     ]
     st.session_state.model = None
     st.session_state.scaler = None
+    st.session_state.outlier_limits = None # Stocker les limites de capping
     st.session_state.metrics = None
     st.session_state.model_feature_names = None
     st.session_state.model_name = None
@@ -220,7 +237,8 @@ with st.sidebar:
                 X_train_data_raw = st.session_state.df.drop(columns=[st.session_state.target_col])
                 
                 # Appliquer le preprocessing
-                df_processed, scaler = preprocess_data(X_train_data_raw)
+                # CAPTURE DES LIMITES DE CAPPING
+                df_processed, scaler, outlier_limits = preprocess_data(X_train_data_raw)
                 X = df_processed
                 y = st.session_state.df[st.session_state.target_col]
                 
@@ -230,6 +248,7 @@ with st.sidebar:
                 # Sauvegarde dans la session
                 st.session_state.model = model
                 st.session_state.scaler = scaler
+                st.session_state.outlier_limits = outlier_limits # SAUVEGARDE DE LA LIMITE
                 st.session_state.metrics = metrics
                 st.session_state.model_feature_names = feature_names
                 st.session_state.model_name = model_choice
@@ -274,7 +293,8 @@ with st.sidebar:
                     st.session_state.model, 
                     st.session_state.scaler, 
                     st.session_state.model_feature_names,
-                    input_data
+                    input_data,
+                    st.session_state.outlier_limits # PASSER LES LIMITES DE CAPPING
                 )
                 
                 risk = "❌ RISQUE DE DÉCÈS ÉLEVÉ" if prediction == 1 else "✅ FAIBLE RISQUE DE DÉCÈS (Survie)"
@@ -288,6 +308,7 @@ with st.sidebar:
                 # Ceci devrait maintenant être résolu grâce à la correction
                 st.error(f"Erreur lors de la prédiction. Assurez-vous que les données sont au bon format. Erreur : {e}")
     else:
+        # Ceci est l'affichage initial, qui ne devrait plus apparaître après un entraînement réussi.
         st.info("Veuillez d'abord charger les données et entraîner un modèle.")
 
 
