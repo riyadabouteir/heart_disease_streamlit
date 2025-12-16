@@ -1,8 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -10,9 +14,8 @@ from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                              f1_score, roc_auc_score, roc_curve, confusion_matrix,
                              classification_report)
 from sklearn.preprocessing import StandardScaler
-import pickle # Ajout pour sérialiser le scaler et les modèles
 
-# Configuration de la page (Reste inchangé)
+# Configuration de la page
 st.set_page_config(
     page_title="Dashboard BI - Insuffisance Cardiaque",
     page_icon="❤️",
@@ -20,7 +23,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Style CSS personnalisé (Reste inchangé)
+# Style CSS personnalisé
 st.markdown("""
     <style>
     .main-header {
@@ -49,7 +52,7 @@ st.markdown("""
 st.markdown('<h1 class="main-header">🫀 Dashboard BI - Analyse d\'Insuffisance Cardiaque</h1>', 
             unsafe_allow_html=True)
 
-# Fonction pour le feature engineering (Reste inchangée)
+# Fonction pour le feature engineering
 def feature_engineering(df):
     """Applique le feature engineering sur le dataset Heart Failure"""
     df_engineered = df.copy()
@@ -72,34 +75,29 @@ def feature_engineering(df):
 # Fonction pour entraîner les modèles
 @st.cache_resource
 def train_models(X_train, X_test, y_train, y_test):
-    """Entraîne les trois modèles de classification et retourne les modèles, scaler et résultats"""
+    """Entraîne les trois modèles de classification"""
     models = {}
     results = {}
     
-    # Standardisation des données
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    
     # 1. Logistic Regression
     lr = LogisticRegression(max_iter=1000, random_state=42)
-    lr.fit(X_train_scaled, y_train)
+    lr.fit(X_train, y_train)
     models['Logistic Regression'] = lr
     
     # 2. Random Forest
     rf = RandomForestClassifier(n_estimators=100, random_state=42)
-    rf.fit(X_train_scaled, y_train)
+    rf.fit(X_train, y_train)
     models['Random Forest'] = rf
     
     # 3. Gradient Boosting
     gb = GradientBoostingClassifier(n_estimators=100, random_state=42)
-    gb.fit(X_train_scaled, y_train)
+    gb.fit(X_train, y_train)
     models['Gradient Boosting'] = gb
     
     # Calcul des métriques pour chaque modèle
     for name, model in models.items():
-        y_pred = model.predict(X_test_scaled)
-        y_pred_proba = model.predict_proba(X_test_scaled)[:, 1]
+        y_pred = model.predict(X_test)
+        y_pred_proba = model.predict_proba(X_test)[:, 1]
         
         results[name] = {
             'Accuracy': accuracy_score(y_test, y_pred),
@@ -111,38 +109,7 @@ def train_models(X_train, X_test, y_train, y_test):
             'y_pred_proba': y_pred_proba
         }
     
-    return models, results, scaler, X_test, y_test
-
-# Fonction pour la prédiction d'un nouveau patient
-def predict_new_patient(model, scaler, patient_data):
-    """
-    Prédit le risque de décès pour un nouveau patient.
-    patient_data est un DataFrame 1 ligne avec les features.
-    """
-    # 1. Feature Engineering (pour Kidney_Heart_Risk et Anemia_Diabetes)
-    patient_data['Kidney_Heart_Risk'] = (
-        patient_data['serum_creatinine'] * patient_data['high_blood_pressure']
-    )
-    patient_data['Anemia_Diabetes'] = (
-        patient_data['anaemia'] & patient_data['diabetes']
-    ).astype(int)
-    
-    # 2. Sélection et Ordre des features (doit correspondre à l'entraînement)
-    features_to_use = ['age', 'anaemia', 'creatinine_phosphokinase', 'diabetes',
-                       'ejection_fraction', 'high_blood_pressure', 'platelets',
-                       'serum_creatinine', 'serum_sodium', 'sex', 'smoking', 'time',
-                       'Kidney_Heart_Risk', 'Anemia_Diabetes']
-    
-    X_new = patient_data[features_to_use]
-    
-    # 3. Scaling (Utiliser le scaler FIT sur les données d'entraînement)
-    X_new_scaled = scaler.transform(X_new)
-    
-    # 4. Prédiction
-    prediction = model.predict(X_new_scaled)[0]
-    proba = model.predict_proba(X_new_scaled)[0][1] # Probabilité de décès (classe 1)
-    
-    return prediction, proba
+    return models, results
 
 # Sidebar avec upload de fichier
 with st.sidebar:
@@ -168,9 +135,7 @@ with st.sidebar:
              "📊 Exploration des Données (EDA)",
              "🔬 Feature Engineering",
              "🤖 Modélisation & Prédictions",
-             "🧪 Prédictions Individuelles", # Nouvelle page
-             "📈 Comparaison des Modèles",
-             "💡 Insights & Recommandations"]
+             "📈 Comparaison des Modèles"]
         )
     else:
         page = "🏠 Accueil"
@@ -197,7 +162,7 @@ elif 'df_failure' in st.session_state:
 else:
     df_failure = None
 
-# Si pas de données, afficher la page d'upload (Reste inchangé)
+# Si pas de données, afficher la page d'upload
 if df_failure is None:
     st.markdown("""
     <div class="upload-section">
@@ -276,35 +241,7 @@ if df_failure is None:
 else:
     # Les données sont chargées, afficher les pages
     
-    # Préparation des données pour le ML (nécessaire pour plusieurs pages)
-    df_model = feature_engineering(df_failure)
-    
-    # Définir les features
-    features_to_use = ['age', 'anaemia', 'creatinine_phosphokinase', 'diabetes',
-                       'ejection_fraction', 'high_blood_pressure', 'platelets',
-                       'serum_creatinine', 'serum_sodium', 'sex', 'smoking', 'time',
-                       'Kidney_Heart_Risk', 'Anemia_Diabetes']
-    
-    X = df_model[features_to_use]
-    y = df_model['DEATH_EVENT']
-    
-    # Split initial (pour l'entraînement)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    
-    # Entraînement et récupération des modèles et du scaler
-    with st.spinner("⏳ Préparation des modèles en arrière-plan..."):
-        models, results, scaler, X_test_df, y_test_series = train_models(X_train, X_test, y_train, y_test)
-        
-    st.session_state['models'] = models
-    st.session_state['results'] = results
-    st.session_state['scaler'] = scaler
-    st.session_state['X_test_df'] = X_test_df
-    st.session_state['y_test_series'] = y_test_series
-    
-    
-    # PAGE 1: ACCUEIL (Reste inchangé)
+    # PAGE 1: ACCUEIL
     if page == "🏠 Accueil":
         st.header("Bienvenue sur le Dashboard BI")
         
@@ -341,10 +278,10 @@ else:
         
         with col1:
             fig = px.pie(df_failure, names='DEATH_EVENT', 
-                         title='Répartition Survie vs Décès',
-                         color='DEATH_EVENT',
-                         color_discrete_map={0: '#4ECDC4', 1: '#FF6B6B'},
-                         labels={'DEATH_EVENT': 'Événement'})
+                        title='Répartition Survie vs Décès',
+                        color='DEATH_EVENT',
+                        color_discrete_map={0: '#4ECDC4', 1: '#FF6B6B'},
+                        labels={'DEATH_EVENT': 'Événement'})
             fig.update_traces(textposition='inside', textinfo='percent+label')
             st.plotly_chart(fig, use_container_width=True)
         
@@ -365,7 +302,7 @@ else:
             st.warning(f"⚠️ {missing.sum()} valeurs manquantes détectées")
             st.dataframe(missing[missing > 0], use_container_width=True)
     
-    # PAGE 2: EXPLORATION DES DONNÉES (Reste inchangé)
+    # PAGE 2: EXPLORATION DES DONNÉES
     elif page == "📊 Exploration des Données (EDA)":
         st.header("Analyse Exploratoire des Données (EDA)")
         
@@ -376,20 +313,20 @@ else:
         
         with col1:
             fig = px.histogram(df_failure, x='DEATH_EVENT', 
-                               color='DEATH_EVENT',
-                               title="Distribution des Événements de Décès",
-                               labels={'DEATH_EVENT': 'Événement (0=Survie, 1=Décès)'},
-                               color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
-                               text_auto=True)
+                             color='DEATH_EVENT',
+                             title="Distribution des Événements de Décès",
+                             labels={'DEATH_EVENT': 'Événement (0=Survie, 1=Décès)'},
+                             color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
+                             text_auto=True)
             fig.update_layout(showlegend=False, bargap=0.2)
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
             value_counts = df_failure['DEATH_EVENT'].value_counts()
             st.metric("Survie (0)", value_counts[0], 
-                      delta=f"{value_counts[0]/len(df_failure)*100:.1f}%")
+                     delta=f"{value_counts[0]/len(df_failure)*100:.1f}%")
             st.metric("Décès (1)", value_counts[1],
-                      delta=f"{value_counts[1]/len(df_failure)*100:.1f}%")
+                     delta=f"{value_counts[1]/len(df_failure)*100:.1f}%")
             st.metric("Ratio", f"{value_counts[1]/value_counts[0]:.3f}")
         
         st.divider()
@@ -407,19 +344,19 @@ else:
         
         with col1:
             fig = px.histogram(df_failure, x=selected_var, 
-                               color='DEATH_EVENT',
-                               marginal="box",
-                               title=f"Distribution de {selected_var}",
-                               color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
-                               labels={'DEATH_EVENT': 'Événement'})
+                             color='DEATH_EVENT',
+                             marginal="box",
+                             title=f"Distribution de {selected_var}",
+                             color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
+                             labels={'DEATH_EVENT': 'Événement'})
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
             fig = px.box(df_failure, x='DEATH_EVENT', y=selected_var,
-                         color='DEATH_EVENT',
-                         title=f"Boxplot de {selected_var} par classe",
-                         color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
-                         labels={'DEATH_EVENT': 'Événement'})
+                        color='DEATH_EVENT',
+                        title=f"Boxplot de {selected_var} par classe",
+                        color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
+                        labels={'DEATH_EVENT': 'Événement'})
             st.plotly_chart(fig, use_container_width=True)
         
         st.divider()
@@ -430,11 +367,11 @@ else:
         corr_matrix = df_failure.select_dtypes(include=[np.number]).corr()
         
         fig = px.imshow(corr_matrix, 
-                        text_auto='.2f',
-                        aspect="auto",
-                        color_continuous_scale='RdBu_r',
-                        title="Matrice de Corrélation",
-                        zmin=-1, zmax=1)
+                       text_auto='.2f',
+                       aspect="auto",
+                       color_continuous_scale='RdBu_r',
+                       title="Matrice de Corrélation",
+                       zmin=-1, zmax=1)
         fig.update_layout(height=600)
         st.plotly_chart(fig, use_container_width=True)
         
@@ -447,12 +384,12 @@ else:
         
         with col1:
             fig = px.bar(x=target_corr.values, 
-                         y=target_corr.index,
-                         orientation='h',
-                         title="Corrélations avec DEATH_EVENT",
-                         labels={'x': 'Corrélation', 'y': 'Variable'},
-                         color=target_corr.values,
-                         color_continuous_scale='RdBu_r')
+                        y=target_corr.index,
+                        orientation='h',
+                        title="Corrélations avec DEATH_EVENT",
+                        labels={'x': 'Corrélation', 'y': 'Variable'},
+                        color=target_corr.values,
+                        color_continuous_scale='RdBu_r')
             fig.update_layout(height=500)
             st.plotly_chart(fig, use_container_width=True)
         
@@ -462,7 +399,7 @@ else:
                 emoji = "📈" if corr > 0 else "📉"
                 st.metric(f"{i}. {var}", f"{corr:.3f}", delta=emoji)
     
-    # PAGE 3: FEATURE ENGINEERING (Reste inchangé)
+    # PAGE 3: FEATURE ENGINEERING
     elif page == "🔬 Feature Engineering":
         st.header("Feature Engineering")
         
@@ -510,7 +447,7 @@ else:
             - **serum_creatinine** (fonction rénale)
             - **high_blood_pressure** (hypertension)
             
-            Risque = créatinine $\\times$ hypertension
+            Risque = créatinine × hypertension
             """)
         
         with col3:
@@ -532,19 +469,19 @@ else:
         
         with col1:
             fig = px.histogram(df_engineered, x='Age_Group', 
-                               color='DEATH_EVENT',
-                               title="Distribution des Groupes d'Âge par Outcome",
-                               barmode='group',
-                               color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
-                               labels={'DEATH_EVENT': 'Événement'})
+                             color='DEATH_EVENT',
+                             title="Distribution des Groupes d'Âge par Outcome",
+                             barmode='group',
+                             color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
+                             labels={'DEATH_EVENT': 'Événement'})
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
             fig = px.box(df_engineered, x='Age_Group', y='Kidney_Heart_Risk',
-                         color='DEATH_EVENT',
-                         title="Kidney_Heart_Risk par Groupe d'Âge",
-                         color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
-                         labels={'DEATH_EVENT': 'Événement'})
+                        color='DEATH_EVENT',
+                        title="Kidney_Heart_Risk par Groupe d'Âge",
+                        color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
+                        labels={'DEATH_EVENT': 'Événement'})
             st.plotly_chart(fig, use_container_width=True)
         
         st.divider()
@@ -559,11 +496,11 @@ else:
         
         with col1:
             fig = px.imshow(corr_new, 
-                            text_auto='.3f',
-                            aspect="auto",
-                            color_continuous_scale='RdBu_r',
-                            title="Corrélations des Nouvelles Features avec DEATH_EVENT",
-                            zmin=-1, zmax=1)
+                           text_auto='.3f',
+                           aspect="auto",
+                           color_continuous_scale='RdBu_r',
+                           title="Corrélations des Nouvelles Features avec DEATH_EVENT",
+                           zmin=-1, zmax=1)
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
@@ -571,7 +508,7 @@ else:
             for feature in new_features:
                 corr_value = corr_new.loc[feature, 'DEATH_EVENT']
                 st.metric(feature, f"{corr_value:.4f}",
-                          delta="Positive" if corr_value > 0 else "Négative")
+                         delta="Positive" if corr_value > 0 else "Négative")
             
             st.markdown("""
             ---
@@ -581,20 +518,42 @@ else:
             - **Anemia_Diabetes** : Combinaison utile pour identifier les patients à risque
             """)
     
-    # PAGE 4: MODÉLISATION & PRÉDICTIONS (Mise à jour pour utiliser les session_state)
+    # PAGE 4: MODÉLISATION & PRÉDICTIONS
     elif page == "🤖 Modélisation & Prédictions":
         st.header("Modélisation & Prédictions")
         
         st.info("""
-        Cette section présente les performances des modèles entraînés sur le dataset pour prédire le risque de décès.
-        
+        Cette section entraîne et évalue trois modèles de classification:
         - ⚙️ Régression Logistique
         - 🌲 Random Forest (Recommandé)
         - 📈 Gradient Boosting
         """)
         
-        results = st.session_state['results']
-        models = st.session_state['models']
+        # Préparation des données
+        df_model = feature_engineering(df_failure)
+        
+        features_to_use = ['age', 'anaemia', 'creatinine_phosphokinase', 'diabetes',
+                          'ejection_fraction', 'high_blood_pressure', 'platelets',
+                          'serum_creatinine', 'serum_sodium', 'sex', 'smoking', 'time',
+                          'Kidney_Heart_Risk', 'Anemia_Diabetes']
+        
+        X = df_model[features_to_use]
+        y = df_model['DEATH_EVENT']
+        
+        # Split et normalisation
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Entraînement
+        with st.spinner("🔄 Entraînement des modèles en cours..."):
+            models, results = train_models(X_train_scaled, X_test_scaled, y_train, y_test)
+        
+        st.success("✅ Modèles entraînés avec succès!")
         
         st.divider()
         
@@ -618,55 +577,29 @@ else:
             return ['background-color: lightgreen' if v else '' for v in is_max]
         
         st.dataframe(results_df.style.apply(highlight_max, axis=0), 
-                     use_container_width=True)
+                    use_container_width=True)
         
         st.divider()
         
         # Visualisations
-        col1, col2 = st.columns(2)
+        # Feature Importance (Random Forest)
+        st.subheader("🌲 Feature Importance (Random Forest)")
         
-        with col1:
-            # Comparaison des métriques
-            st.subheader("📊 Comparaison des Métriques")
-            
-            fig = go.Figure()
-            metrics = ['Accuracy', 'Precision', 'Recall', 'F1-Score', 'ROC-AUC']
-            
-            for model_name in results.keys():
-                values = [results[model_name][metric] for metric in metrics]
-                fig.add_trace(go.Scatterpolar(
-                    r=values,
-                    theta=metrics,
-                    fill='toself',
-                    name=model_name
-                ))
-            
-            fig.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
-                showlegend=True,
-                height=400
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        rf_model = models['Random Forest']
+        feature_importance = pd.DataFrame({
+            'feature': features_to_use,
+            'importance': rf_model.feature_importances_
+        }).sort_values('importance', ascending=False).head(10)
         
-        with col2:
-            # Feature Importance (Random Forest)
-            st.subheader("🌲 Feature Importance (Random Forest)")
-            
-            rf_model = models['Random Forest']
-            feature_importance = pd.DataFrame({
-                'feature': features_to_use,
-                'importance': rf_model.feature_importances_
-            }).sort_values('importance', ascending=False).head(10)
-            
-            fig = px.bar(feature_importance, 
-                         x='importance', 
-                         y='feature',
-                         orientation='h',
-                         title="Top 10 Variables Importantes",
-                         color='importance',
-                         color_continuous_scale='Viridis')
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
+        fig = px.bar(feature_importance, 
+                   x='importance', 
+                   y='feature',
+                   orientation='h',
+                   title="Top 10 Variables Importantes",
+                   color='importance',
+                   color_continuous_scale='Viridis')
+        fig.update_layout(height=500)
+        st.plotly_chart(fig, use_container_width=True)
         
         st.divider()
         
@@ -674,166 +607,51 @@ else:
         st.subheader("🎯 Matrice de Confusion (Random Forest)")
         
         best_model = 'Random Forest'
-        cm = confusion_matrix(st.session_state['y_test_series'], results[best_model]['y_pred'])
+        cm = confusion_matrix(y_test, results[best_model]['y_pred'])
         
         col1, col2, col3 = st.columns([1, 2, 1])
         
         with col2:
             fig = px.imshow(cm, 
-                            text_auto=True,
-                            labels=dict(x="Prédiction", y="Réalité", color="Count"),
-                            x=['Survie', 'Décès'],
-                            y=['Survie', 'Décès'],
-                            color_continuous_scale='Blues',
-                            title=f"Matrice de Confusion - {best_model}")
+                           text_auto=True,
+                           labels=dict(x="Prédiction", y="Réalité", color="Count"),
+                           x=['Survie', 'Décès'],
+                           y=['Survie', 'Décès'],
+                           color_continuous_scale='Blues',
+                           title=f"Matrice de Confusion - {best_model}")
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
         
         # Rapport de classification
         with st.expander("📄 Rapport de Classification Détaillé"):
-            report = classification_report(st.session_state['y_test_series'], 
-                                           results[best_model]['y_pred'], 
-                                           target_names=['Survie', 'Décès'])
+            report = classification_report(y_test, results[best_model]['y_pred'], 
+                                          target_names=['Survie', 'Décès'])
             st.text(report)
-
-    # NOUVELLE PAGE 5: PRÉDICTIONS INDIVIDUELLES
-    elif page == "🧪 Prédictions Individuelles":
-        st.header("Prédiction du Risque de Décès pour un Nouveau Patient")
-        
-        st.info("""
-        Utilisez les curseurs pour définir les paramètres d'un nouveau patient et obtenir une estimation de son risque de décès, 
-        basée sur le modèle le plus performant (**Random Forest**).
-        """)
-        
-        # Utiliser les modèles et scaler stockés
-        models = st.session_state['models']
-        scaler = st.session_state['scaler']
-        best_model_name = max(st.session_state['results'].items(), key=lambda x: x[1]['ROC-AUC'])[0]
-        model = models[best_model_name]
-        
-        # Trouver les min/max pour les inputs
-        df_desc = df_failure.describe().T
-        
-        # Formulaire de saisie
-        with st.form("patient_form"):
-            st.subheader("Paramètres Démographiques et Cliniques")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                age = st.slider("Âge (années)", min_value=int(df_desc.loc['age', 'min']), 
-                                max_value=int(df_desc.loc['age', 'max']), value=60)
-                sex = st.selectbox("Sexe", options=[1, 0], format_func=lambda x: 'Homme' if x == 1 else 'Femme', index=0)
-                smoking = st.selectbox("Fumeur", options=[0, 1], format_func=lambda x: 'Non' if x == 0 else 'Oui', index=0)
-            
-            with col2:
-                diabetes = st.selectbox("Diabète", options=[0, 1], format_func=lambda x: 'Non' if x == 0 else 'Oui', index=0)
-                anaemia = st.selectbox("Anémie", options=[0, 1], format_func=lambda x: 'Non' if x == 0 else 'Oui', index=0)
-                high_blood_pressure = st.selectbox("Hypertension", options=[0, 1], format_func=lambda x: 'Non' if x == 0 else 'Oui', index=0)
-                
-            with col3:
-                time = st.slider("Période de Suivi (jours)", min_value=int(df_desc.loc['time', 'min']), 
-                                 max_value=int(df_desc.loc['time', 'max']), value=150)
-            
-            st.subheader("Résultats des Biomarqueurs")
-            col4, col5, col6 = st.columns(3)
-            
-            with col4:
-                ejection_fraction = st.slider("Fraction d'Éjection (%)", 
-                                              min_value=int(df_desc.loc['ejection_fraction', 'min']), 
-                                              max_value=int(df_desc.loc['ejection_fraction', 'max']), value=35)
-                
-            with col5:
-                serum_creatinine = st.slider("Créatinine Sérique (mg/dL)", 
-                                             min_value=float(df_desc.loc['serum_creatinine', 'min']), 
-                                             max_value=float(df_desc.loc['serum_creatinine', 'max']), value=1.4, step=0.1)
-                
-            with col6:
-                serum_sodium = st.slider("Sodium Sérique (mEq/L)", 
-                                         min_value=int(df_desc.loc['serum_sodium', 'min']), 
-                                         max_value=int(df_desc.loc['serum_sodium', 'max']), value=136)
-            
-            col7, col8 = st.columns(2)
-            with col7:
-                creatinine_phosphokinase = st.slider("CPK (mcg/L)", 
-                                                     min_value=int(df_desc.loc['creatinine_phosphokinase', 'min']), 
-                                                     max_value=int(df_desc.loc['creatinine_phosphokinase', 'max']), value=500)
-            with col8:
-                platelets = st.slider("Plaquettes (kiloplaquettes/mL)", 
-                                      min_value=int(df_desc.loc['platelets', 'min']), 
-                                      max_value=int(df_desc.loc['platelets', 'max']), value=250000)
-                
-            submitted = st.form_submit_button("Calculer le Risque de Décès")
-
-        if submitted:
-            # Créer un DataFrame pour le nouveau patient
-            new_patient_data = pd.DataFrame({
-                'age': [age],
-                'anaemia': [anaemia],
-                'creatinine_phosphokinase': [creatinine_phosphokinase],
-                'diabetes': [diabetes],
-                'ejection_fraction': [ejection_fraction],
-                'high_blood_pressure': [high_blood_pressure],
-                'platelets': [platelets],
-                'serum_creatinine': [serum_creatinine],
-                'serum_sodium': [serum_sodium],
-                'sex': [sex],
-                'smoking': [smoking],
-                'time': [time]
-            })
-            
-            # Faire la prédiction
-            prediction, proba = predict_new_patient(model, scaler, new_patient_data)
-            
-            risk_percent = proba * 100
-            
-            st.divider()
-            st.subheader(f"Résultats de la Prédiction ({best_model_name})")
-            
-            if prediction == 1:
-                st.error(f"❌ Patient à **Risque Élevé** de Décès.")
-                st.markdown(f"**Probabilité estimée de décès :** **{risk_percent:.2f}%**")
-                
-                if ejection_fraction < 30:
-                    st.warning("🚨 Alerte : La Fraction d'Éjection est très faible (< 30%), un facteur de risque majeur.")
-                if serum_creatinine > 1.5:
-                    st.warning("🚨 Alerte : La Créatinine Sérique est élevée (> 1.5), indiquant un risque rénal/cardiaque accru.")
-                if time < 50:
-                    st.warning("🚨 Alerte : Le temps de suivi est court (< 50 jours), le risque est maximal en début de suivi.")
-                    
-            else:
-                st.success(f"✅ Patient à **Faible Risque** de Décès.")
-                st.markdown(f"**Probabilité estimée de décès :** **{risk_percent:.2f}%**")
-                if risk_percent > 30:
-                    st.info("💡 Note : Bien que la prédiction soit 'Survie', la probabilité reste modérée. Une surveillance est conseillée.")
-            
-            # Jauge de risque
-            fig = go.Figure(go.Indicator(
-                mode = "gauge+number",
-                value = risk_percent,
-                title = {'text': "Score de Risque de Décès (%)"},
-                gauge = {
-                    'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                    'bar': {'color': "darkgray"},
-                    'bgcolor': "white",
-                    'steps': [
-                        {'range': [0, 30], 'color': "green"},
-                        {'range': [30, 60], 'color': "yellow"},
-                        {'range': [60, 100], 'color': "red"}],
-                    'threshold': {
-                        'line': {'color': "black", 'width': 4},
-                        'thickness': 0.75,
-                        'value': risk_percent}}
-            ))
-            fig.update_layout(height=300)
-            st.plotly_chart(fig, use_container_width=True)
-
-    # PAGE 6: COMPARAISON DES MODÈLES (Reste inchangé)
+    
+    # PAGE 5: COMPARAISON DES MODÈLES
     elif page == "📈 Comparaison des Modèles":
         st.header("Comparaison Avancée des Modèles")
         
-        results = st.session_state['results']
-        y_test = st.session_state['y_test_series']
+        # Préparation
+        df_model = feature_engineering(df_failure)
+        features_to_use = ['age', 'anaemia', 'creatinine_phosphokinase', 'diabetes',
+                          'ejection_fraction', 'high_blood_pressure', 'platelets',
+                          'serum_creatinine', 'serum_sodium', 'sex', 'smoking', 'time',
+                          'Kidney_Heart_Risk', 'Anemia_Diabetes']
+        
+        X = df_model[features_to_use]
+        y = df_model['DEATH_EVENT']
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        with st.spinner("⏳ Entraînement des modèles..."):
+            models, results = train_models(X_train_scaled, X_test_scaled, y_train, y_test)
         
         # Courbes ROC
         st.subheader("📉 Courbes ROC")
@@ -880,12 +698,12 @@ else:
                 cm = confusion_matrix(y_test, res['y_pred'])
                 
                 fig = px.imshow(cm, 
-                                text_auto=True,
-                                labels=dict(x="Prédiction", y="Réalité"),
-                                x=['Survie', 'Décès'],
-                                y=['Survie', 'Décès'],
-                                color_continuous_scale='Blues',
-                                title=name)
+                               text_auto=True,
+                               labels=dict(x="Prédiction", y="Réalité"),
+                               x=['Survie', 'Décès'],
+                               y=['Survie', 'Décès'],
+                               color_continuous_scale='Blues',
+                               title=name)
                 fig.update_layout(height=350)
                 st.plotly_chart(fig, use_container_width=True)
         
@@ -917,147 +735,12 @@ else:
         événements de décès.
         """)
     
-    # PAGE 7: INSIGHTS & RECOMMANDATIONS
-    elif page == "💡 Insights & Recommandations":
-        st.header("Insights & Recommandations Cliniques")
-        
-        # Section 1: Variables clés
-        st.subheader("🔍 Variables Clés Identifiées")
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.markdown("""
-            ### 📊 Top 3 Facteurs Prédictifs
-            
-            #### 1️⃣ Time (Période de Suivi)
-            - **Corrélation** : -0.53 avec mortalité
-            - **Impact** : Les patients avec un suivi plus court ont un risque élevé
-            - **Importance** : Variable la plus discriminante dans tous les modèles
-            
-            #### 2️⃣ Ejection Fraction (Fonction Cardiaque)
-            - **Seuil critique** : < 30%
-            - **Impact** : Distribution nettement différente entre survivants et décédés
-            - **Importance** : Indicateur direct de la santé cardiaque
-            
-            #### 3️⃣ Serum Creatinine (Fonction Rénale)
-            - **Seuil d'alerte** : > 1.5 mg/dL
-            - **Impact** : Forte corrélation avec la mortalité
-            - **Interaction** : Effet amplifié avec l'hypertension (Kidney_Heart_Risk)
-            """)
-        
-        with col2:
-            # Boxplots des variables clés
-            key_vars = ['time', 'ejection_fraction', 'serum_creatinine']
-            
-            for var in key_vars:
-                fig = px.box(df_model, x='DEATH_EVENT', y=var,
-                             color='DEATH_EVENT',
-                             color_discrete_sequence=['#4ECDC4', '#FF6B6B'],
-                             labels={'DEATH_EVENT': 'Événement'})
-                fig.update_layout(height=200, showlegend=False, 
-                                  title=dict(text=var, font=dict(size=12)))
-                st.plotly_chart(fig, use_container_width=True)
-        
-        st.divider()
-        
-        # Section 2: Protocole de stratification
-        st.subheader("🏥 Protocole de Stratification du Risque") 
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("""
-            ### 🔴 Risque ÉLEVÉ
-            
-            **Critères** (Approximatifs, basés sur l'analyse) :
-            - **Time** < 50 jours
-            - **Ejection Fraction** < 30%
-            - **Serum Creatinine** > 1.5 mg/dL
-            
-            **Actions** :
-            - 🚨 Surveillance intensive et continue.
-            - 📅 Consultations hebdomadaires ou mensuelles.
-            - 💊 Optimisation thérapeutique agressive.
-            - 🏥 Évaluation pour hospitalisation ou soins spécialisés.
-            """)
-        
-        with col2:
-            st.markdown("""
-            ### 🟡 Risque MODÉRÉ
-            
-            **Critères** :
-            - **Time** 50-100 jours
-            - **Ejection Fraction** 30-40%
-            - **Serum Creatinine** 1.0-1.5 mg/dL
-            
-            **Actions** :
-            - ⚠️ Surveillance standard mais rapprochée.
-            - 📅 Consultations trimestrielles.
-            - 💊 Suivi thérapeutique régulier et ajustements.
-            - 📊 Monitoring actif des biomarqueurs clés.
-            """)
-        
-        with col3:
-            st.markdown("""
-            ### 🟢 Risque FAIBLE
-            
-            **Critères** :
-            - **Time** > 100 jours
-            - **Ejection Fraction** > 40%
-            - **Serum Creatinine** < 1.0 mg/dL
-            
-            **Actions** :
-            - ✅ Surveillance légère.
-            - 📅 Consultations semestrielles ou annuelles.
-            - 💊 Traitement de maintien.
-            - 🏃 Encouragement aux changements de mode de vie (non-fumeur, activité physique).
-            """)
-        
-        st.divider()
-        
-        # Section 3: Recommandations
-        st.subheader("🎯 Actions Prioritaires")
-        
-        tab1, tab2, tab3 = st.tabs(["🩺 Cliniques", "📊 Système", "🔬 Recherche"])
-        
-        with tab1:
-            st.markdown("""
-            ### 👨‍⚕️ Recommandations Cliniques
-            
-            * **Focus sur l'EF et la Créatinine :** Ces deux marqueurs sont les plus prédictifs après le temps de suivi. Une surveillance et une intervention rapide sont cruciales pour les patients ayant une **fraction d'éjection (EF) faible** et une **créatinine sérique élevée**.
-            * **Gestion des Comorbidités :** L'interaction entre l'**hypertension** et la **créatinine sérique** (nouvelle feature `Kidney_Heart_Risk`) montre un risque accru. Une gestion agressive de l'hypertension est recommandée pour les patients ayant une fonction rénale déjà compromise.
-            * **Consultations Précoces :** Les décès se produisant majoritairement au début du suivi (*Time* faible), un protocole d'urgence et des consultations très rapprochées devraient être mis en place dans les 1 à 2 premiers mois pour les patients nouvellement diagnostiqués ou en phase aiguë.
-            """)
-        
-        with tab2:
-            st.markdown("""
-            ### 💻 Recommandations Système et BI
-            
-            * **Déploiement du Modèle :** Le modèle **Random Forest** devrait être intégré dans le Système d'Information Hospitalier (SIH) pour fournir un score de risque en temps réel.
-            * **Alerte Automatique :** Mise en place d'alertes automatiques pour les patients dont le score de risque prédit dépasse un seuil critique (ex: > 70%), afin de notifier le personnel soignant immédiatement.
-            * **Amélioration des Données :** Collecter des données supplémentaires sur les facteurs environnementaux, les antécédents familiaux plus détaillés, ou les résultats d'examens (BNP, troponine) pour affiner la précision du modèle.
-            """)
-        
-        with tab3:
-            st.markdown("""
-            ### 🔬 Pistes de Recherche ML
-            
-            * **Optimisation :** Tester l'optimisation des hyperparamètres des modèles (Grid Search/Bayesian Optimization) pour Random Forest et Gradient Boosting afin de maximiser le ROC-AUC ou le F1-Score.
-            * **Gestion du Déséquilibre :** Expérimenter des techniques de rééchantillonnage (SMOTE) ou de pondération des classes pour améliorer la prédiction de la classe minoritaire (**Décès**), qui est cruciale.
-            * **Modèles d'Interprétabilité :** Utiliser des outils comme **SHAP** ou **LIME** pour obtenir une interprétabilité locale (par patient), au-delà de l'importance globale des variables, renforçant la confiance clinique.
-            """)
-        
-        st.divider()
-        
-        # Conclusion et appel à l'action
-        st.markdown("""
-        <div style="text-align: center; padding: 20px; border: 1px solid #1f77b4; border-radius: 10px; margin-top: 30px;">
-            <h2>🎉 Analyse Complète !</h2>
-            <p>
-                Ce tableau de bord offre une vue complète, de l'exploration des données à la prédiction du risque de mortalité, 
-                permettant une prise de décision basée sur les données pour améliorer les soins aux patients atteints d'insuffisance cardiaque.
-            </p>
-            <strong>Passez à l'onglet "🧪 Prédictions Individuelles" pour tester un scénario !</strong>
-        </div>
-        """, unsafe_allow_html=True)
+
+# Footer
+st.divider()
+st.markdown("""
+<div style='text-align: center; color: gray; padding: 2rem;'>
+    <p><strong>Dashboard BI - Analyse Prédictive d'Insuffisance Cardiaque</strong></p>
+    <p>Développé avec Streamlit | Machine Learning pour la Santé</p>
+</div>
+""", unsafe_allow_html=True)
